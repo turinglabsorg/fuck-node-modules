@@ -188,9 +188,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     
-    for folder in &stats.folders {
-        println!("  - {}", folder.display());
+    // Show folder list (with limit for large projects)
+    if stats.count <= 10 {
+        for folder in &stats.folders {
+            println!("  - {}", folder.display());
+        }
+    } else {
+        println!("  - {}", style(format!("Showing first 10 of {} folders...", stats.count)).italic());
+        for folder in &stats.folders[..10] {
+            println!("  - {}", folder.display());
+        }
+        println!("  - ... and {} more folders", style((stats.count - 10).to_string()).italic());
     }
+    
+    // Summary before confirmation
+    println!("\n{}", style("📋 SUMMARY:").bold().underlined());
+    println!("  🗑️  To be deleted: {} folders ({})", 
+        style(stats.count.to_string()).bold().red(),
+        style(format_size(stats.total_size, DECIMAL)).bold().red()
+    );
+    
+    if stats.skipped_recent > 0 {
+        println!("  🔒  Preserved: {} recent folders ({})", 
+            style(stats.skipped_recent.to_string()).bold().green(),
+            style(format_size(stats.skipped_size, DECIMAL)).bold().green()
+        );
+    }
+    
+    let total_possible = stats.total_size + stats.skipped_size;
+    println!("  💾  Total possible savings: {}", 
+        style(format_size(total_possible, DECIMAL)).bold().blue()
+    );
     
     if args.force || args.yes || Confirm::new()
         .with_prompt(format!("Delete {} folders and reclaim {}?", 
