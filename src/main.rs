@@ -60,6 +60,12 @@ fn find_node_modules_folders(path: &PathBuf, older_than_days: u64) -> Result<Nod
         if entry.file_name() == "node_modules" {
             let folder_path = entry.path().to_path_buf();
             
+            // Skip if this is a nested node_modules (like in pnpm's .pnpm structure)
+            if folder_path.parent().and_then(|p| p.parent()).map_or(false, |gp| 
+                gp.ends_with(".pnpm") || gp.file_name().and_then(|n| n.to_str()) == Some(".pnpm")) {
+                continue;
+            }
+            
             // Get the parent directory (the project folder containing node_modules)
             let parent_path = match folder_path.parent() {
                 Some(parent) => parent,
@@ -73,23 +79,6 @@ fn find_node_modules_folders(path: &PathBuf, older_than_days: u64) -> Result<Nod
             // Get the most recent modification time of any file in the parent project
             let most_recent_time = get_most_recent_file_time(parent_path)?;
             
-            // Calculate folder size first (we need it even if we skip)
-            let mut folder_size = 0;
-            for item in WalkDir::new(&folder_path).follow_links(false) {
-                if let Ok(item) = item {
-                    if let Ok(metadata) = item.metadata() {
-                        folder_size += metadata.len();
-                    }
-                }
-            }
-            
-            // Skip if the project has been worked on recently
-            if most_recent_time > cutoff_time {
-                stats.skipped_recent += 1;
-                stats.skipped_size += folder_size;
-                continue;
-            }
-            
             // Calculate folder size (skip errors)
             let mut folder_size = 0;
             for item in WalkDir::new(&folder_path).follow_links(false) {
@@ -99,6 +88,13 @@ fn find_node_modules_folders(path: &PathBuf, older_than_days: u64) -> Result<Nod
                     }
                 }
                 // Silently skip any errors during size calculation
+            }
+            
+            // Skip if the project has been worked on recently
+            if most_recent_time > cutoff_time {
+                stats.skipped_recent += 1;
+                stats.skipped_size += folder_size;
+                continue;
             }
 
             stats.count += 1;
@@ -126,12 +122,15 @@ fn get_most_recent_file_time(path: &std::path::Path) -> Result<u64, Box<dyn std:
             continue;
         }
         
-        if let Ok(metadata) = entry.metadata() {
-            if let Ok(modified) = metadata.modified() {
-                if let Ok(duration) = modified.duration_since(UNIX_EPOCH) {
-                    let file_time = duration.as_secs();
-                    if file_time > most_recent {
-                        most_recent = file_time;
+        // Only check files (not directories)
+        if entry.file_type().is_file() {
+            if let Ok(metadata) = entry.metadata() {
+                if let Ok(modified) = metadata.modified() {
+                    if let Ok(duration) = modified.duration_since(UNIX_EPOCH) {
+                        let file_time = duration.as_secs();
+                        if file_time > most_recent {
+                            most_recent = file_time;
+                        }
                     }
                 }
             }
