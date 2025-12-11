@@ -60,9 +60,26 @@ fn find_node_modules_folders(path: &PathBuf, older_than_days: u64) -> Result<Nod
         if entry.file_name() == "node_modules" {
             let folder_path = entry.path().to_path_buf();
             
-            // Skip if this is a nested node_modules (like in pnpm's .pnpm structure)
+            // Skip if this is a nested node_modules (like in pnpm's .pnpm structure OR inside another node_modules)
+            // Check if any parent directory is node_modules (indicating nesting)
+            let mut path_cursor = folder_path.as_path();
+            let mut is_nested = false;
+            while let Some(parent) = path_cursor.parent() {
+                if parent.ends_with("node_modules") {
+                    is_nested = true;
+                    break;
+                }
+                path_cursor = parent;
+            }
+            
+            if is_nested {
+                continue;
+            }
+            
+            // Also skip pnpm structure
             if folder_path.parent().and_then(|p| p.parent()).map_or(false, |gp| 
-                gp.ends_with(".pnpm") || gp.file_name().and_then(|n| n.to_str()) == Some(".pnpm")) {
+                gp.ends_with(".pnpm") || 
+                gp.file_name().and_then(|n| n.to_str()) == Some(".pnpm")) {
                 continue;
             }
             
@@ -76,8 +93,21 @@ fn find_node_modules_folders(path: &PathBuf, older_than_days: u64) -> Result<Nod
                 }
             };
             
+            // Debug output
+            if cfg!(debug_assertions) {
+                println!("DEBUG: Checking node_modules in: {}", parent_path.display());
+            }
+            
             // Get the most recent modification time of any file in the parent project
             let most_recent_time = get_most_recent_file_time(parent_path)?;
+            
+            // Debug output for the most recent time found
+            if cfg!(debug_assertions) {
+                let current_time_debug = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+                let days_old = (current_time_debug - most_recent_time) / (24 * 60 * 60);
+                println!("DEBUG: Most recent file in {} is {} days old", 
+                    parent_path.display(), days_old);
+            }
             
             // Calculate folder size (skip errors)
             let mut folder_size = 0;
@@ -88,6 +118,29 @@ fn find_node_modules_folders(path: &PathBuf, older_than_days: u64) -> Result<Nod
                     }
                 }
                 // Silently skip any errors during size calculation
+            }
+            
+            // Debug: Print decision logic
+            if cfg!(debug_assertions) {
+                println!("DEBUG: {} - most_recent: {}, cutoff: {}, will_be: {}", 
+                    folder_path.display(), 
+                    most_recent_time, 
+                    cutoff_time,
+                    if most_recent_time > cutoff_time { "SKIPPED" } else { "DELETED" }
+                );
+            }
+            
+            // Handle future dates (files modified in the future are definitely recent!)
+            let current_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+            
+            // If file is from the future, treat as recent
+            if most_recent_time > current_time {
+                stats.skipped_recent += 1;
+                stats.skipped_size += folder_size;
+                if cfg!(debug_assertions) {
+                    println!("DEBUG: Future file detected in {}, skipping", folder_path.display());
+                }
+                continue;
             }
             
             // Skip if the project has been worked on recently
@@ -111,7 +164,8 @@ fn find_node_modules_folders(path: &PathBuf, older_than_days: u64) -> Result<Nod
 fn get_most_recent_file_time(path: &std::path::Path) -> Result<u64, Box<dyn std::error::Error>> {
     let mut most_recent = 0u64;
     
-    for entry in WalkDir::new(path).follow_links(false) {
+    // Use max depth of 3 to avoid deep scanning
+    for entry in WalkDir::new(path).follow_links(false).max_depth(3) {
         let entry = match entry {
             Ok(e) => e,
             Err(_) => continue, // Skip inaccessible files/directories
@@ -122,14 +176,36 @@ fn get_most_recent_file_time(path: &std::path::Path) -> Result<u64, Box<dyn std:
             continue;
         }
         
+        // Skip git and build directories - they don't indicate active development
+        if entry.path().starts_with(path.join(".git")) ||
+           entry.path().starts_with(path.join(".build")) ||
+           entry.path().starts_with(path.join("dist")) ||
+           entry.path().starts_with(path.join("build")) {
+            continue;
+        }
+        
         // Only check files (not directories)
         if entry.file_type().is_file() {
-            if let Ok(metadata) = entry.metadata() {
-                if let Ok(modified) = metadata.modified() {
-                    if let Ok(duration) = modified.duration_since(UNIX_EPOCH) {
-                        let file_time = duration.as_secs();
-                        if file_time > most_recent {
-                            most_recent = file_time;
+            // Focus on source files that indicate active development
+            let file_name = entry.file_name().to_string_lossy();
+            let is_source_file = file_name.ends_with(".ts") || 
+                                file_name.ends_with(".js") || 
+                                file_name.ends_with(".tsx") || 
+                                file_name.ends_with(".jsx") ||
+                                file_name.ends_with(".json") ||
+                                file_name.ends_with(".md") ||
+                                file_name == "package.json" ||
+                                file_name == "tsconfig.json" ||
+                                file_name == "jsconfig.json";
+            
+            if is_source_file {
+                if let Ok(metadata) = entry.metadata() {
+                    if let Ok(modified) = metadata.modified() {
+                        if let Ok(duration) = modified.duration_since(UNIX_EPOCH) {
+                            let file_time = duration.as_secs();
+                            if file_time > most_recent {
+                                most_recent = file_time;
+                            }
                         }
                     }
                 }
